@@ -1,39 +1,37 @@
 import sys
 from datetime import datetime
-import random
 from google.cloud import storage
 from google.cloud import batch_v1
 
-def create_container_job(project_id: str, region: str, job_name: str, url) -> batch_v1.Job:
+def create_container_job(project_id: str, region: str, job_name: str, env_dict: dict, task_count: int) -> batch_v1.Job:
 
     client = batch_v1.BatchServiceClient()
 
     # Define what will be done as part of the job.
     runnable = batch_v1.Runnable()
     runnable.container = batch_v1.Runnable.Container()
-    runnable.container.image_uri = "gcr.io/google-containers/busybox"
-    runnable.container.entrypoint = "/bin/sh"
-    runnable.container.commands = ["-c", "echo My download url is ${URL}"]
+    runnable.container.image_uri = "gcr.io/cms-transparency-project/batch-processor-ubuntu"
 
-    # Jobs can be divided into tasks. In this case, we have only one task.
     task = batch_v1.TaskSpec()
     task.runnables = [runnable]
-    #Pass environment variables to the task
-    task.environment.variables = {"URL":f"{url}"}
+    #Pass environment variable dictionary to the task
+    task.environment.variables = env_dict
+
 
     # We can specify what resources are requested by each task.
     resources = batch_v1.ComputeResource()
     resources.cpu_milli = 2000  # in milliseconds per cpu-second. This means the task requires 2 whole CPUs.
-    resources.memory_mib = 1024  # in MiB
+    resources.memory_mib = 4096  # in MiB
     task.compute_resource = resources
 
-    task.max_retry_count = 2
-    task.max_run_duration = "3600s"
+    task.max_retry_count = 1
+    task.max_run_duration = "14400s"
 
     # Tasks are grouped inside a job using TaskGroups.
     # Currently, it's possible to have only one task group.
     group = batch_v1.TaskGroup()
-    group.task_count = 2
+    group.parallelism = 8
+    group.task_count = task_count
     group.task_spec = task
     policy = batch_v1.AllocationPolicy.InstancePolicy()
     policy.machine_type = "e2-standard-4"
@@ -63,19 +61,26 @@ def download_blob(bucket_name, blob_name):
     contents = blob.download_as_string()
     return contents
 
+def create_env_vars(contents):
+    i = 0
+    env_vars = {} 
+    for line in contents.splitlines():
+        url = line.decode()
+        env_vars[f"URL{i}"] = url
+        i += 1
+    return env_vars, i
+
 def main(argv):
     project_id = "cms-transparency-project"
     region = "us-central1"
     now = datetime.now()
     bucket_name = "cms-json-trigger-bucket"
     blob_name = sys.argv[1]
-    print(blob_name)
     contents = download_blob(bucket_name,blob_name) 
-    for line in contents.splitlines():
-        random_num = random.randint(1,1000)
-        job_name = "job"+"-"+str(random_num)+"-"+now.strftime("%H-%M-%S-%f")
-        url = line.decode()
-        create_container_job(project_id, region, job_name, url)
+    env_dict, task_count = create_env_vars(contents)
+    job_name = "job"+now.strftime("%H-%M-%S-%f")
+    create_container_job(project_id, region, job_name, env_dict, task_count)
+    print(f"Batch job {job_name} created from {blob_name} file list")
 
 if __name__ == "__main__":
    main(sys.argv[1:])
